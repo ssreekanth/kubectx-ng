@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+#
+# kubectx-ng (next generation) - A utility to manage and switch between kubectl contexts.
+# Combines the power of kubectx with per-shell context isolation.
+#
+# Features:
+# - Switch contexts globally (default) or per-shell
+# - Interactive selection with fzf
+# - Previous context switching with '-'
+# - Color-coded current context
+#
+# Modes:
+# - Global mode: Modifies ~/.kube/config (like kubectx)
+# - Per-shell mode: Uses KUBECONFIG env var (like kubech)
+#
+# Usage:
+#   kubectx-ng                    : list contexts (or interactive with fzf)
+#   kubectx-ng <NAME>             : switch to context <NAME>
+#   kubectx-ng -                  : switch to previous context
+#   kubectx-ng -c, --current      : show current context
+#   kubectx-ng <NEW>=<OLD>        : rename context
+#   kubectx-ng -d <NAME>          : delete context
+#   kubectx-ng -u, --unset        : unset current context
+#   kubectx-ng --mode             : show current mode (global/per-shell)
+#
+
+[[ -n $DEBUG ]] && set -x
+
+set -eou pipefail
+IFS=$'\n\t'
+
+SELF_CMD="$0"
+
+# Detect mode: per-shell if KUBECONFIG_DEST_DIR is set, otherwise global
+KUBECTX_MODE="${KUBECTX_MODE:-auto}"
+KUBECONFIG_DEST_DIR="${KUBECONFIG_DEST_DIR:-}"
+KUBECONFIG_SRC_DIR="${KUBECONFIG_SRC_DIR:-$HOME/.kube/config.src.d}"
+
+# Cache files for previous context
+KUBECTX_GLOBAL="${XDG_CACHE_HOME:-$HOME/.kube}/kubectx"
+# Use shell PID if provided (for per-shell mode), otherwise use script PID
+KUBECTX_SHELL="${KUBECONFIG_DEST_DIR}/.kubectx.${KUBECTX_SHELL_PID:-$$}"
+
+usage() {
+  local SELF
+  SELF="kubectx-ng"
+  if [[ "$(basename "$0")" == kubectl-* ]]; then
+    SELF="kubectl ctx"
+  fi
+
+  cat <<EOF
+USAGE:
+  $SELF                       : list contexts (interactive with fzf if available)
+  $SELF <NAME>                : switch to context <NAME>
+  $SELF -                     : switch to previous context
+  $SELF -c, --current         : show current context name
+  $SELF <NEW_NAME>=<NAME>     : rename context <NAME> to <NEW_NAME>
+  $SELF <NEW_NAME>=.          : rename current context to <NEW_NAME>
+  $SELF -d <NAME> [<NAME...>] : delete context <NAME> ('.' for current)
+  $SELF -u, --unset           : unset current context
+  $SELF --mode                : show current mode (global/per-shell)
+  $SELF -h, --help            : show this message
+
+MODES:
+  Global mode    : Changes affect all terminals (modifies ~/.kube/config)
+  Per-shell mode : Changes only affect current terminal (uses KUBECONFIG env var)
+
+  Set KUBECONFIG_DEST_DIR to enable per-shell mode automatically.
+  Current mode: $(get_mode)
+
+ENVIRONMENT:
+  KUBECTX_MODE           : Force mode ('global' or 'per-shell', default: 'auto')
+  KUBECONFIG_DEST_DIR    : Directory for per-shell config files
+  KUBECONFIG_SRC_DIR     : Additional config files directory (default: ~/.kube/config.src.d)
+  KUBECTX_IGNORE_FZF     : Set to bypass fzf interactive selection
+  KUBECTX_CURRENT_FGCOLOR: Foreground color for current context
+  KUBECTX_CURRENT_BGCOLOR: Background color for current context
+EOF
+}
+
+exit_err() {
+  echo >&2 "${1}"
+  exit 1
+}
+
+get_mode() {
+  if [[ "${KUBECTX_MODE}" == "per-shell" ]]; then
+    echo "per-shell"
+  elif [[ "${KUBECTX_MODE}" == "global" ]]; then
+    echo "global"
+  elif [[ -n "${KUBECONFIG_DEST_DIR}" ]]; then
+    echo "per-shell"
+  else
+    echo "global"
+  fi
+}
+
+is_per_shell_mode() {
+  [[ "$(get_mode)" == "per-shell" ]]
+}
+
+# Get all config files for per-shell mode
+_kubeconfig_files() {
+  local files=""
+  if [[ -d "${KUBECONFIG_SRC_DIR}" ]]; then
+    files="$(find "${KUBECONFIG_SRC_DIR}" -type f -print 2>/dev/null | tr '\n' ':' || true)"
+  fi
+  # Always use the original config file, not the current KUBECONFIG value
+  # which may already include generated per-shell configs
+  local orig="${KUBECONFIG_ORIG:-$HOME/.kube/config}"
+  echo "${files}${orig}"
+}
+
+# Generate context-specific config file for per-shell mode
+_generate_context_config() {
+  local context="${1}"
+  local namespace="${2:-default}"
+  local filename
+
+  # Sanitize context name for filename
+  filename=$(echo "${context}" | tr -c '[:alnum:]\n' '_')
+  filename="${filename}-${namespace}.yaml"
+
+  local dest="${KUBECONFIG_DEST_DIR}/${filename}"
+
+  # Create directory if needed
+  mkdir -p "${KUBECONFIG_DEST_DIR}"
+  chmod 700 "${KUBECONFIG_DEST_DIR}"
+
+  # Generate config
+  touch "${dest}"
+  chmod 600 "${dest}"
+
+  KUBECONFIG="$(_kubeconfig_files)" \
+    $KUBECTL config view \
+      --minify \
+      --flatten \
+      --context="${context}" > "${dest}"
+
+  echo "${dest}"
+}
+
+current_context() {
+  # In per-shell mode, use KUBECONFIG if set, otherwise show global context
+  if is_per_shell_mode; then
+    if [[ -n "${KUBECONFIG:-}" ]]; then
+      # Per-shell context is active
+      $KUBECTL config current-context
+    else
+      # No per-shell context set yet, show global context
+      # This happens when you first open a shell before switching contexts
+      $KUBECTL config current-context
+    fi
+  else
+    # Global mode
+    $KUBECTL config current-context
+  fi
+}
+
+get_contexts() {
+  if is_per_shell_mode; then
+    KUBECONFIG="$(_kubeconfig_files)" $KUBECTL config get-contexts -o=name | sort -n
+  else
+    $KUBECTL config get-contexts -o=name | sort -n
+  fi
+}
+
+list_contexts() {
+  set -u pipefail
+  local cur ctx_list
+  cur="$(current_context)" || exit_err "error getting current context"
+  ctx_list=$(get_contexts) || exit_err "error getting context list"
+
+  local yellow darkbg normal
+  yellow=$(tput setaf 3 || true)
+  darkbg=$(tput setab 0 || true)
+  normal=$(tput sgr0 || true)
+
+  local cur_ctx_fg cur_ctx_bg
+  cur_ctx_fg=${KUBECTX_CURRENT_FGCOLOR:-$yellow}
+  cur_ctx_bg=${KUBECTX_CURRENT_BGCOLOR:-$darkbg}
+
+  for c in $ctx_list; do
+    if [[ -n "${_KUBECTX_FORCE_COLOR:-}" || \
+         -t 1 && -z "${NO_COLOR:-}" ]]; then
+      # colored output mode
+      if [[ "${c}" = "${cur}" ]]; then
+        echo "${cur_ctx_bg}${cur_ctx_fg}${c}${normal}"
+      else
+        echo "${c}"
+      fi
+    else
+      echo "${c}"
+    fi
+  done
+}
+
+read_context() {
+  local file
+  if is_per_shell_mode; then
+    file="${KUBECTX_SHELL}"
+  else
+    file="${KUBECTX_GLOBAL}"
+  fi
+
+  if [[ -f "${file}" ]]; then
+    cat "${file}"
+  fi
+}
+
+save_context() {
+  local file
+  if is_per_shell_mode; then
+    file="${KUBECTX_SHELL}"
+  else
+    file="${KUBECTX_GLOBAL}"
+  fi
+
+  local saved
+  saved="$(read_context)"
+
+  if [[ "${saved}" != "${1}" ]]; then
+    printf %s "${1}" > "${file}"
+  fi
+}
+
+switch_context() {
+  if is_per_shell_mode; then
+    # Get current namespace
+    local namespace
+    namespace=$($KUBECTL config view -o=jsonpath='{.contexts[?(@.name=="'"${1}"'")].context.namespace}')
+    namespace="${namespace:-default}"
+
+    # Generate new config file
+    local config_file
+    config_file=$(_generate_context_config "${1}" "${namespace}")
+
+    # Use only the generated config (it's self-contained with --flatten)
+    local new_kubeconfig="${config_file}"
+
+    # Write to temp file for shell function to read and export
+    if [[ -n "${KUBECTX_EXPORT_FILE:-}" ]]; then
+      echo "EXPORT:${new_kubeconfig}" > "${KUBECTX_EXPORT_FILE}"
+    fi
+
+    echo "Switched to context \"${1}\" (per-shell mode)."
+  else
+    $KUBECTL config use-context "${1}"
+  fi
+}
+
+choose_context_interactive() {
+  local choice
+  choice="$(_KUBECTX_FORCE_COLOR=1 \
+    FZF_DEFAULT_COMMAND="${SELF_CMD}" \
+    fzf --ansi --no-preview || true)"
+  if [[ -z "${choice}" ]]; then
+    echo >&2 "error: you did not choose any of the options"
+    exit 1
+  else
+    set_context "${choice}"
+  fi
+}
+
+set_context() {
+  local prev
+  prev="$(current_context)" || exit_err "error getting current context"
+
+  switch_context "${1}"
+
+  if [[ "${prev}" != "${1}" ]]; then
+    save_context "${prev}"
+  fi
+}
+
+swap_context() {
+  local ctx
+  ctx="$(read_context)"
+  if [[ -z "${ctx}" ]]; then
+    echo "error: No previous context found." >&2
+    exit 1
+  fi
+  set_context "${ctx}"
+}
+
+context_exists() {
+  if is_per_shell_mode; then
+    KUBECONFIG="$(_kubeconfig_files)" $KUBECTL config get-contexts -o=name | grep -q "^${1}\$"
+  else
+    $KUBECTL config get-contexts -o=name | grep -q "^${1}\$"
+  fi
+}
+
+rename_context() {
+  local old_name="${1}"
+  local new_name="${2}"
+
+  if [[ "${old_name}" == "." ]]; then
+    old_name="$(current_context)"
+  fi
+
+  if ! context_exists "${old_name}"; then
+    echo "error: Context \"${old_name}\" not found, can't rename it." >&2
+    exit 1
+  fi
+
+  if context_exists "${new_name}"; then
+    echo "Context \"${new_name}\" exists, deleting..." >&2
+    $KUBECTL config delete-context "${new_name}" 1>/dev/null 2>&1
+  fi
+
+  if is_per_shell_mode; then
+    exit_err "error: rename not supported in per-shell mode"
+  fi
+
+  $KUBECTL config rename-context "${old_name}" "${new_name}"
+}
+
+delete_contexts() {
+  for i in "${@}"; do
+    delete_context "${i}"
+  done
+}
+
+delete_context() {
+  local ctx="${1}"
+  if [[ "${ctx}" == "." ]]; then
+    ctx="$(current_context)" || exit_err "error getting current context"
+  fi
+
+  if is_per_shell_mode; then
+    exit_err "error: delete not supported in per-shell mode (use global mode)"
+  fi
+
+  echo "Deleting context \"${ctx}\"..." >&2
+  $KUBECTL config delete-context "${ctx}"
+}
+
+unset_context() {
+  if is_per_shell_mode; then
+    # Write to temp file for shell function to unset KUBECONFIG
+    if [[ -n "${KUBECTX_EXPORT_FILE:-}" ]]; then
+      echo "UNSET" > "${KUBECTX_EXPORT_FILE}"
+    fi
+    echo "Unset KUBECONFIG (per-shell mode)."
+  else
+    echo "Unsetting current context."
+    $KUBECTL config unset current-context
+  fi
+}
+
+show_mode() {
+  local mode
+  mode=$(get_mode)
+  echo "Current mode: ${mode}"
+
+  if [[ "${mode}" == "per-shell" ]]; then
+    echo "  KUBECONFIG_DEST_DIR: ${KUBECONFIG_DEST_DIR}"
+    echo "  KUBECONFIG: ${KUBECONFIG:-<not set>}"
+  fi
+}
+
+main() {
+  if [[ -z "${KUBECTL:-}" ]]; then
+    if hash kubectl 2>/dev/null; then
+      KUBECTL=kubectl
+    elif hash kubectl.exe 2>/dev/null; then
+      KUBECTL=kubectl.exe
+    else
+      echo >&2 "kubectl is not installed"
+      exit 1
+    fi
+  fi
+
+  if [[ "$#" -eq 0 ]]; then
+    if [[ -t 1 && -z "${KUBECTX_IGNORE_FZF:-}" && "$(type fzf &>/dev/null; echo $?)" -eq 0 ]]; then
+      choose_context_interactive
+    else
+      list_contexts
+    fi
+  elif [[ "${1}" == "-d" ]]; then
+    if [[ "$#" -lt 2 ]]; then
+      echo "error: missing context NAME" >&2
+      usage
+      exit 1
+    fi
+    delete_contexts "${@:2}"
+  elif [[ "${1}" == "--mode" ]]; then
+    show_mode
+  elif [[ "$#" -gt 1 ]]; then
+    echo "error: too many arguments" >&2
+    usage
+    exit 1
+  elif [[ "$#" -eq 1 ]]; then
+    if [[ "${1}" == "-" ]]; then
+      swap_context
+    elif [[ "${1}" == '-c' || "${1}" == '--current' ]]; then
+      current_context
+    elif [[ "${1}" == '-u' || "${1}" == '--unset' ]]; then
+      unset_context
+    elif [[ "${1}" == '-h' || "${1}" == '--help' ]]; then
+      usage
+    elif [[ "${1}" =~ ^-(.*) ]]; then
+      echo "error: unrecognized flag \"${1}\"" >&2
+      usage
+      exit 1
+    elif [[ "${1}" =~ (.+)=(.+) ]]; then
+      rename_context "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}"
+    else
+      set_context "${1}"
+    fi
+  else
+    usage
+    exit 1
+  fi
+}
+
+main "$@"

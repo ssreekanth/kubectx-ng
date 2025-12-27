@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+#
+# kubens-ng (next generation) - A utility to switch between Kubernetes namespaces.
+# Combines the power of kubens with per-shell namespace isolation.
+#
+# Features:
+# - Switch namespaces globally (default) or per-shell
+# - Interactive selection with fzf
+# - Previous namespace switching with '-'
+# - Color-coded current namespace
+#
+# Modes:
+# - Global mode: Modifies ~/.kube/config (like kubens)
+# - Per-shell mode: Uses KUBECONFIG env var (like kubech)
+#
+# Usage:
+#   kubens-ng                     : list namespaces (or interactive with fzf)
+#   kubens-ng <NAME>              : switch to namespace <NAME>
+#   kubens-ng -                   : switch to previous namespace
+#   kubens-ng -c, --current       : show current namespace
+#
+
+[[ -n $DEBUG ]] && set -x
+
+set -eou pipefail
+IFS=$'\n\t'
+
+SELF_CMD="$0"
+
+# Detect mode: per-shell if KUBECONFIG_DEST_DIR is set, otherwise global
+KUBECTX_MODE="${KUBECTX_MODE:-auto}"
+KUBECONFIG_DEST_DIR="${KUBECONFIG_DEST_DIR:-}"
+KUBECONFIG_SRC_DIR="${KUBECONFIG_SRC_DIR:-$HOME/.kube/config.src.d}"
+KUBECH_NAMESPACE_CHECK="${KUBECH_NAMESPACE_CHECK:-list}"
+
+# Cache files for previous namespace
+KUBENS_DIR_GLOBAL="${XDG_CACHE_HOME:-$HOME/.kube}/kubens"
+# Use shell PID if provided (for per-shell mode), otherwise use a global dir
+KUBENS_DIR_SHELL="${KUBECONFIG_DEST_DIR}/.kubens.${KUBECTX_SHELL_PID:-global}"
+
+usage() {
+  local SELF
+  SELF="kubens-ng"
+  if [[ "$(basename "$0")" == kubectl-* ]]; then
+    SELF="kubectl ns"
+  fi
+
+  cat <<EOF
+USAGE:
+  $SELF                    : list namespaces (interactive with fzf if available)
+  $SELF <NAME>             : switch to namespace <NAME>
+  $SELF -                  : switch to previous namespace
+  $SELF -c, --current      : show current namespace
+  $SELF --mode             : show current mode (global/per-shell)
+  $SELF -h, --help         : show this message
+
+MODES:
+  Global mode    : Changes affect all terminals (modifies ~/.kube/config)
+  Per-shell mode : Changes only affect current terminal (uses KUBECONFIG env var)
+
+  Set KUBECONFIG_DEST_DIR to enable per-shell mode automatically.
+  Current mode: $(get_mode)
+
+ENVIRONMENT:
+  KUBECTX_MODE             : Force mode ('global' or 'per-shell', default: 'auto')
+  KUBECONFIG_DEST_DIR      : Directory for per-shell config files
+  KUBECONFIG_SRC_DIR       : Additional config files directory
+  KUBECH_NAMESPACE_CHECK   : Namespace validation method ('list' or 'label')
+  KUBECTX_IGNORE_FZF       : Set to bypass fzf interactive selection
+  KUBECTX_CURRENT_FGCOLOR  : Foreground color for current namespace
+  KUBECTX_CURRENT_BGCOLOR  : Background color for current namespace
+EOF
+}
+
+exit_err() {
+  echo >&2 "${1}"
+  exit 1
+}
+
+get_mode() {
+  if [[ "${KUBECTX_MODE}" == "per-shell" ]]; then
+    echo "per-shell"
+  elif [[ "${KUBECTX_MODE}" == "global" ]]; then
+    echo "global"
+  elif [[ -n "${KUBECONFIG_DEST_DIR}" ]]; then
+    echo "per-shell"
+  else
+    echo "global"
+  fi
+}
+
+is_per_shell_mode() {
+  [[ "$(get_mode)" == "per-shell" ]]
+}
+
+# Get all config files for per-shell mode
+_kubeconfig_files() {
+  local files=""
+  if [[ -d "${KUBECONFIG_SRC_DIR}" ]]; then
+    files="$(find "${KUBECONFIG_SRC_DIR}" -type f -print 2>/dev/null | tr '\n' ':' || true)"
+  fi
+  # Always use the original config file, not the current KUBECONFIG value
+  # which may already include generated per-shell configs
+  local orig="${KUBECONFIG_ORIG:-$HOME/.kube/config}"
+  echo "${files}${orig}"
+}
+
+# Generate context-specific config file for per-shell mode
+_generate_context_config() {
+  local context="${1}"
+  local namespace="${2}"
+  local filename
+
+  # Sanitize context name for filename
+  filename=$(echo "${context}" | tr -c '[:alnum:]\n' '_')
+  filename="${filename}-${namespace}.yaml"
+
+  local dest="${KUBECONFIG_DEST_DIR}/${filename}"
+
+  # Create directory if needed
+  mkdir -p "${KUBECONFIG_DEST_DIR}"
+  chmod 700 "${KUBECONFIG_DEST_DIR}"
+
+  # Generate config
+  touch "${dest}"
+  chmod 600 "${dest}"
+
+  KUBECONFIG="$(_kubeconfig_files)" \
+    $KUBECTL config view \
+      --minify \
+      --flatten \
+      --context="${context}" > "${dest}"
+
+  # Set namespace in the config
+  KUBECONFIG="${dest}" \
+    $KUBECTL config set-context "${context}" --namespace="${namespace}" >/dev/null
+
+  echo "${dest}"
+}
+
+current_namespace() {
+  local cur_ctx ns
+
+  cur_ctx="$(current_context)" || exit_err "error getting current context"
+  ns="$($KUBECTL config view -o=jsonpath="{.contexts[?(@.name==\"${cur_ctx}\")].context.namespace}")" \
+     || exit_err "error getting current namespace"
+
+  if [[ -z "${ns}" ]]; then
+    echo "default"
+  else
+    echo "${ns}"
+  fi
+}
+
+current_context() {
+  # In per-shell mode, use KUBECONFIG if set, otherwise show global context
+  if is_per_shell_mode; then
+    if [[ -n "${KUBECONFIG:-}" ]]; then
+      # Per-shell context is active
+      $KUBECTL config current-context
+    else
+      # No per-shell context set yet, show global context
+      # This happens when you first open a shell before switching contexts
+      $KUBECTL config current-context
+    fi
+  else
+    # Global mode
+    $KUBECTL config current-context
+  fi
+}
+
+get_namespaces() {
+  $KUBECTL get namespaces -o=jsonpath='{range .items[*].metadata.name}{@}{"\n"}{end}'
+}
+
+escape_context_name() {
+  echo "${1//\//-}"
+}
+
+namespace_file() {
+  local ctx dir
+  ctx="$(escape_context_name "${1}")"
+
+  if is_per_shell_mode; then
+    dir="${KUBENS_DIR_SHELL}"
+  else
+    dir="${KUBENS_DIR_GLOBAL}"
+  fi
+
+  mkdir -p "${dir}"
+  echo "${dir}/${ctx}"
+}
+
+read_namespace() {
+  local f
+  f="$(namespace_file "${1}")"
+  [[ -f "${f}" ]] && cat "${f}"
+  return 0
+}
+
+save_namespace() {
+  local f saved
+  f="$(namespace_file "${1}")"
+  saved="$(read_namespace "${1}")"
+
+  if [[ "${saved}" != "${2}" ]]; then
+    printf %s "${2}" > "${f}"
+  fi
+}
+
+switch_namespace() {
+  local ctx="${1}"
+  local ns="${2}"
+
+  if is_per_shell_mode; then
+    # Generate new config file with namespace
+    local config_file
+    config_file=$(_generate_context_config "${ctx}" "${ns}")
+
+    # Use only the generated config (it's self-contained with --flatten)
+    local new_kubeconfig="${config_file}"
+
+    # Write to temp file for shell function to read and export
+    if [[ -n "${KUBECTX_EXPORT_FILE:-}" ]]; then
+      echo "EXPORT:${new_kubeconfig}" > "${KUBECTX_EXPORT_FILE}"
+    fi
+
+    echo "Active namespace is \"${ns}\" (per-shell mode)."
+  else
+    $KUBECTL config set-context "${ctx}" --namespace="${ns}" >/dev/null
+    echo "Active namespace is \"${ns}\"."
+  fi
+}
+
+choose_namespace_interactive() {
+  # Verify we can list namespaces first
+  if [[ -z "$(list_namespaces 2>/dev/null || true)" ]]; then
+    echo >&2 "error: could not list namespaces (is the cluster accessible?)"
+    exit 1
+  fi
+
+  local choice
+  choice="$(_KUBECTX_FORCE_COLOR=1 \
+    FZF_DEFAULT_COMMAND="${SELF_CMD}" \
+    fzf --ansi --no-preview || true)"
+  if [[ -z "${choice}" ]]; then
+    echo >&2 "error: you did not choose any of the options"
+    exit 1
+  else
+    set_namespace "${choice}"
+  fi
+}
+
+namespace_exists() {
+  local ns="${1}"
+
+  if [[ "${KUBECH_NAMESPACE_CHECK}" == "label" ]]; then
+    # Fast check using label (k8s 1.22+)
+    [[ -n "$($KUBECTL get namespaces -l "kubernetes.io/metadata.name=${ns}" -o name 2>/dev/null || true)" ]]
+  else
+    # Traditional check by listing all
+    get_namespaces | grep -q "^${ns}\$"
+  fi
+}
+
+set_namespace() {
+  local ctx prev ns="${1}"
+
+  ctx="$(current_context)" || exit_err "error getting current context"
+  prev="$(current_namespace)" || exit_err "error getting current namespace"
+
+  if namespace_exists "${ns}"; then
+    switch_namespace "${ctx}" "${ns}"
+
+    if [[ "${prev}" != "${ns}" ]]; then
+      save_namespace "${ctx}" "${prev}"
+    fi
+  else
+    echo "error: no namespace exists with name \"${ns}\"." >&2
+    exit 1
+  fi
+}
+
+list_namespaces() {
+  local yellow darkbg normal
+  yellow=$(tput setaf 3 || true)
+  darkbg=$(tput setab 0 || true)
+  normal=$(tput sgr0 || true)
+
+  local cur_ctx_fg cur_ctx_bg
+  cur_ctx_fg=${KUBECTX_CURRENT_FGCOLOR:-$yellow}
+  cur_ctx_bg=${KUBECTX_CURRENT_BGCOLOR:-$darkbg}
+
+  local cur ns_list
+  cur="$(current_namespace)" || exit_err "error getting current namespace"
+  ns_list=$(get_namespaces) || exit_err "error getting namespace list"
+
+  for c in $ns_list; do
+    if [[ -n "${_KUBECTX_FORCE_COLOR:-}" || \
+         -t 1 && -z "${NO_COLOR:-}" ]]; then
+      # colored output mode
+      if [[ "${c}" = "${cur}" ]]; then
+        echo "${cur_ctx_bg}${cur_ctx_fg}${c}${normal}"
+      else
+        echo "${c}"
+      fi
+    else
+      echo "${c}"
+    fi
+  done
+}
+
+swap_namespace() {
+  local ctx ns
+  ctx="$(current_context)" || exit_err "error getting current context"
+  ns="$(read_namespace "${ctx}")"
+  if [[ -z "${ns}" ]]; then
+    echo "error: No previous namespace found for current context." >&2
+    exit 1
+  fi
+  set_namespace "${ns}"
+}
+
+show_mode() {
+  local mode
+  mode=$(get_mode)
+  echo "Current mode: ${mode}"
+
+  if [[ "${mode}" == "per-shell" ]]; then
+    echo "  KUBECONFIG_DEST_DIR: ${KUBECONFIG_DEST_DIR}"
+    echo "  KUBECONFIG: ${KUBECONFIG:-<not set>}"
+  fi
+}
+
+main() {
+  if [[ -z "${KUBECTL:-}" ]]; then
+    if hash kubectl 2>/dev/null; then
+      KUBECTL=kubectl
+    elif hash kubectl.exe 2>/dev/null; then
+      KUBECTL=kubectl.exe
+    else
+      echo >&2 "kubectl is not installed"
+      exit 1
+    fi
+  fi
+
+  if [[ "$#" -eq 0 ]]; then
+    if [[ -t 1 && -z ${KUBECTX_IGNORE_FZF:-} && "$(type fzf &>/dev/null; echo $?)" -eq 0 ]]; then
+      choose_namespace_interactive
+    else
+      list_namespaces
+    fi
+  elif [[ "$#" -eq 1 ]]; then
+    if [[ "${1}" == '-h' || "${1}" == '--help' ]]; then
+      usage
+    elif [[ "${1}" == "-" ]]; then
+      swap_namespace
+    elif [[ "${1}" == '-c' || "${1}" == '--current' ]]; then
+      current_namespace
+    elif [[ "${1}" == '--mode' ]]; then
+      show_mode
+    elif [[ "${1}" =~ ^-(.*) ]]; then
+      echo "error: unrecognized flag \"${1}\"" >&2
+      usage
+      exit 1
+    else
+      set_namespace "${1}"
+    fi
+  else
+    echo "error: too many arguments" >&2
+    usage
+    exit 1
+  fi
+}
+
+main "$@"
