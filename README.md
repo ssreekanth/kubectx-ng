@@ -1,5 +1,10 @@
 # kubectx-ng & kubens-ng
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Shell](https://img.shields.io/badge/Shell-Bash%20%7C%20Zsh%20%7C%20Fish-green.svg)](https://github.com/ssreekanth/kubectx-ng)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/ssreekanth/kubectx-ng)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-Compatible-326CE5.svg?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+
 Next-generation kubectl context and namespace switcher utilities that combine the best features of [kubectx/kubens](https://github.com/ahmetb/kubectx) with per-shell isolation from [kubech](https://github.com/aabouzaid/kubech).
 
 ## Features
