@@ -1,5 +1,6 @@
 # kubectx-ng & kubens-ng
 
+[![Release](https://img.shields.io/github/v/release/ssreekanth/kubectx-ng)](https://github.com/ssreekanth/kubectx-ng/releases)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash%20%7C%20Zsh%20%7C%20Fish-green.svg)](https://github.com/ssreekanth/kubectx-ng)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/ssreekanth/kubectx-ng)
