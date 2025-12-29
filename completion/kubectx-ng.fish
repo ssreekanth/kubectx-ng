@@ -32,13 +32,18 @@ complete -f -c kctx -n '__fish_kubectx_ng_needs_command' -s u -l unset -d "unset
 complete -f -c kctx -n '__fish_kubectx_ng_needs_command' -l mode -d "show current mode (global/per-shell)"
 complete -f -c kctx -n '__fish_kubectx_ng_needs_command' -s d -d "delete context" -r
 
-# Context names
-complete -f -x -c kubectx-ng -n '__fish_kubectx_ng_arg_number 1' -a "(kubectl config get-contexts --output='name' 2>/dev/null)"
+# Context names (read from original config file, not per-shell config)
+set -l orig_kubeconfig "$HOME/.kube/config"
+if set -q KUBECONFIG_ORIG
+    set orig_kubeconfig $KUBECONFIG_ORIG
+end
+
+complete -f -x -c kubectx-ng -n '__fish_kubectx_ng_arg_number 1' -a "(env KUBECONFIG=$orig_kubeconfig kubectl config get-contexts --output='name' 2>/dev/null)"
 complete -f -x -c kubectx-ng -n '__fish_kubectx_ng_arg_number 1' -a "-" -d "switch to the previous context"
 
-complete -f -x -c kctx -n '__fish_kubectx_ng_arg_number 1' -a "(kubectl config get-contexts --output='name' 2>/dev/null)"
+complete -f -x -c kctx -n '__fish_kubectx_ng_arg_number 1' -a "(env KUBECONFIG=$orig_kubeconfig kubectl config get-contexts --output='name' 2>/dev/null)"
 complete -f -x -c kctx -n '__fish_kubectx_ng_arg_number 1' -a "-" -d "switch to the previous context"
 
 # Context names for -d flag
-complete -f -x -c kubectx-ng -n '__fish_kubectx_ng_using_command -d' -a "(kubectl config get-contexts --output='name' 2>/dev/null)"
-complete -f -x -c kctx -n '__fish_kubectx_ng_using_command -d' -a "(kubectl config get-contexts --output='name' 2>/dev/null)"
+complete -f -x -c kubectx-ng -n '__fish_kubectx_ng_using_command -d' -a "(env KUBECONFIG=$orig_kubeconfig kubectl config get-contexts --output='name' 2>/dev/null)"
+complete -f -x -c kctx -n '__fish_kubectx_ng_using_command -d' -a "(env KUBECONFIG=$orig_kubeconfig kubectl config get-contexts --output='name' 2>/dev/null)"

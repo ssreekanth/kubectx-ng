@@ -76,10 +76,6 @@ kctx() {
   return $exit_code
 }
 
-kubectx() {
-  kctx "$@"
-}
-
 # Also define kubectx-ng as a function for convenience
 kubectx-ng() {
   kctx "$@"
@@ -112,14 +108,6 @@ kns() {
   fi
 
   return $exit_code
-}
-
-kubectx() {
-  kctx "$@"
-}
-
-kubens() {
-  kns "$@"
 }
 
 # Also define kubens-ng as a function for convenience
@@ -185,5 +173,63 @@ kubectx-status() {
 echo "kubectx-ng shell integration loaded"
 echo "  Script directory: ${SCRIPT_DIR}"
 echo "  Mode: ${KUBECTX_MODE}"
-echo "  Commands: kctx, kubectx, kubectx-ng, kns, kubens, kubens-ng"
+echo "  Commands: kctx, kubectx-ng, kns, kubens-ng"
 echo "  Helpers: kubectx-status, kubectx-cleanup, kubectx-global, kubectx-per-shell"
+
+# Register completions explicitly to override any conflicting completions (e.g., from Homebrew)
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+  # Zsh: Load and register completion functions
+  if [[ -d "${SCRIPT_DIR}/completion" ]]; then
+    # Source the completion files directly to define the functions
+    if [[ -f "${SCRIPT_DIR}/completion/_kubectx-ng.zsh" ]]; then
+      source "${SCRIPT_DIR}/completion/_kubectx-ng.zsh"
+      # Unregister any existing completions first
+      compdef -d kctx 2>/dev/null
+      compdef -d kubectx-ng 2>/dev/null
+      # Explicitly register for kctx and kubectx-ng
+      compdef _kubectx-ng kctx
+      compdef _kubectx-ng kubectx-ng
+      echo "  Completions registered: kctx, kubectx-ng"
+
+      # Re-register after all initialization completes to override any late-loading completions
+      # Use precmd hook to re-register on first prompt
+      _kubectx_ng_ensure_completion() {
+        if [[ ${_comps[kctx]} != "_kubectx-ng" ]]; then
+          compdef _kubectx-ng kctx kubectx-ng
+        fi
+        # Remove this hook after first run
+        precmd_functions=(${precmd_functions:#_kubectx_ng_ensure_completion})
+      }
+      precmd_functions+=(_kubectx_ng_ensure_completion)
+    fi
+    if [[ -f "${SCRIPT_DIR}/completion/_kubens-ng.zsh" ]]; then
+      source "${SCRIPT_DIR}/completion/_kubens-ng.zsh"
+      # Unregister any existing completions first
+      compdef -d kns 2>/dev/null
+      compdef -d kubens-ng 2>/dev/null
+      # Explicitly register for kns and kubens-ng
+      compdef _kubens-ng kns
+      compdef _kubens-ng kubens-ng
+      echo "  Completions registered: kns, kubens-ng"
+
+      # Re-register after all initialization completes
+      _kubens_ng_ensure_completion() {
+        if [[ ${_comps[kns]} != "_kubens-ng" ]]; then
+          compdef _kubens-ng kns kubens-ng
+        fi
+        # Remove this hook after first run
+        precmd_functions=(${precmd_functions:#_kubens_ng_ensure_completion})
+      }
+      precmd_functions+=(_kubens_ng_ensure_completion)
+    fi
+  fi
+elif [[ -n "${BASH_VERSION:-}" ]]; then
+  # Bash: Source completion files
+  if [[ -f "${SCRIPT_DIR}/completion/kubectx-ng.bash" ]]; then
+    source "${SCRIPT_DIR}/completion/kubectx-ng.bash"
+    echo "  Bash completions loaded"
+  fi
+  if [[ -f "${SCRIPT_DIR}/completion/kubens-ng.bash" ]]; then
+    source "${SCRIPT_DIR}/completion/kubens-ng.bash"
+  fi
+fi

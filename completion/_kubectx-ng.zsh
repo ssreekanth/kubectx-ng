@@ -2,44 +2,44 @@
 
 # Zsh completion for kubectx-ng
 
-local KUBECTX_GLOBAL="${XDG_CACHE_HOME:-$HOME/.kube}/kubectx"
-local KUBECTX_SHELL="${KUBECONFIG_DEST_DIR}/.kubectx.$$"
-local KUBECTX_FILE=""
+_kubectx-ng() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
 
-# Determine which kubectx file to use based on mode
-if [[ -n "${KUBECONFIG_DEST_DIR}" ]] || [[ "${KUBECTX_MODE}" == "per-shell" ]]; then
-  KUBECTX_FILE="${KUBECTX_SHELL}"
-else
-  KUBECTX_FILE="${KUBECTX_GLOBAL}"
-fi
+  # Get all contexts from the original config file (not per-shell config)
+  local orig_kubeconfig="${KUBECONFIG_ORIG:-$HOME/.kube/config}"
+  local -a contexts
+  contexts=("${(@f)$(KUBECONFIG="$orig_kubeconfig" kubectl config get-contexts --output='name' 2>/dev/null)}")
 
-# Get all contexts
-local context_array=("${(@f)$(kubectl config get-contexts --output='name' 2>/dev/null)}")
-local all_contexts=(\'${^context_array}\')
+  _arguments -C \
+    '(- *)'{-h,--help}'[show help message]' \
+    '(- *)'{-c,--current}'[show current context name]' \
+    '(- *)'{-u,--unset}'[unset current context]' \
+    '(- *)--mode[show current mode (global/per-shell)]' \
+    '-d[delete context]:context:->delete' \
+    '1:context:->context' \
+    && return 0
 
-# Build completion arguments
-local -a args
+  case $state in
+    context)
+      # Add '-' for previous context if history exists
+      local KUBECTX_GLOBAL="${XDG_CACHE_HOME:-$HOME/.kube}/kubectx"
+      local KUBECTX_SHELL="${KUBECONFIG_DEST_DIR}/.kubectx.$$"
+      local KUBECTX_FILE=""
 
-# Add flags
-args+=(
-  '(- *)'{-h,--help}'[show help message]'
-  '(- *)'{-c,--current}'[show current context name]'
-  '(- *)'{-u,--unset}'[unset current context]'
-  '(- *)--mode[show current mode (global/per-shell)]'
-  '-d[delete context]:context:->contexts'
-)
+      if [[ -n "${KUBECONFIG_DEST_DIR}" ]] || [[ "${KUBECTX_MODE}" == "per-shell" ]]; then
+        KUBECTX_FILE="${KUBECTX_SHELL}"
+      else
+        KUBECTX_FILE="${KUBECTX_GLOBAL}"
+      fi
 
-# Add context completion
-if [[ -f "$KUBECTX_FILE" ]]; then
-  # Show '-' if there's a saved previous context
-  args+=('1: :(- ${all_contexts})')
-else
-  args+=('1: :(${all_contexts})')
-fi
-
-_arguments -s -S $args
-
-# Handle -d flag with multiple contexts
-if [[ $state == contexts ]]; then
-  _values 'contexts' ${all_contexts}
-fi
+      if [[ -f "$KUBECTX_FILE" ]]; then
+        compadd "$@" - "-"
+      fi
+      compadd "$@" -a contexts
+      ;;
+    delete)
+      compadd "$@" -a contexts
+      ;;
+  esac
+}

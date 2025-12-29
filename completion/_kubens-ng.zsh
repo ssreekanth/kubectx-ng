@@ -2,13 +2,26 @@
 
 # Zsh completion for kubens-ng
 
-# Get all namespaces
-local namespaces
-namespaces=$(kubectl get namespaces -o=jsonpath='{range .items[*].metadata.name}{@}{"\n"}{end}' 2>/dev/null)
+_kubens-ng() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
 
-# Build completion arguments
-_arguments -s -S \
-  '(- *)'{-h,--help}'[show help message]' \
-  '(- *)'{-c,--current}'[show current namespace]' \
-  '(- *)--mode[show current mode (global/per-shell)]' \
-  "1: :(- ${namespaces})"
+  # Get all namespaces
+  local -a namespaces
+  namespaces=("${(@f)$(kubectl get namespaces -o=jsonpath='{range .items[*].metadata.name}{@}{"\n"}{end}' 2>/dev/null)}")
+
+  _arguments -C \
+    '(- *)'{-h,--help}'[show help message]' \
+    '(- *)'{-c,--current}'[show current namespace]' \
+    '(- *)--mode[show current mode (global/per-shell)]' \
+    '1:namespace:->namespace' \
+    && return 0
+
+  case $state in
+    namespace)
+      # Always offer '-' for previous namespace
+      compadd "$@" - "-"
+      compadd "$@" -a namespaces
+      ;;
+  esac
+}

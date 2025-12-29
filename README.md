@@ -60,7 +60,23 @@ Next-generation kubectl context and namespace switcher utilities that combine th
 
 Shell completions are available for Bash, Zsh, and Fish shells. Completions work for both the full command names (`kubectx-ng`, `kubens-ng`) and the short aliases (`kctx`, `kns`).
 
-#### Bash
+**Note:** When you source `kubectx-ng.sh` (recommended for per-shell mode), completions are **automatically registered** for Bash and Zsh. Manual setup is only needed if you're using global mode or Fish shell.
+
+#### Automatic Setup (Zsh & Bash)
+
+When using per-shell mode, completions are automatically loaded:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+source /path/to/kubectx-ng/kubectx-ng.sh
+# Completions are now automatically registered!
+```
+
+This works even if you have Homebrew's `kubectx` installed - kubectx-ng completions will override them.
+
+#### Manual Setup (Global Mode or Fish)
+
+##### Bash (Global Mode)
 
 ```bash
 # Add to ~/.bashrc
@@ -68,7 +84,7 @@ source /path/to/kubectx-ng/completion/kubectx-ng.bash
 source /path/to/kubectx-ng/completion/kubens-ng.bash
 ```
 
-#### Zsh
+##### Zsh (Global Mode)
 
 ```bash
 # Add to ~/.zshrc
@@ -77,14 +93,7 @@ fpath=(/path/to/kubectx-ng/completion $fpath)
 autoload -U compinit && compinit
 ```
 
-Alternatively, you can manually source them:
-```bash
-# Add to ~/.zshrc
-source /path/to/kubectx-ng/completion/_kubectx-ng.zsh
-source /path/to/kubectx-ng/completion/_kubens-ng.zsh
-```
-
-#### Fish
+##### Fish
 
 ```bash
 # Copy to Fish completions directory
@@ -183,7 +192,8 @@ source /path/to/kubectx-ng.sh
 
 This sets up:
 - `KUBECONFIG_DEST_DIR` for per-shell configs
-- Aliases: `kctx`, `kns`, `kubectx`, `kubens`
+- Command aliases: `kctx`, `kns` (short forms of `kubectx-ng`, `kubens-ng`)
+- Automatic shell completions for all commands
 - Helper functions (see below)
 
 ### How It Works
@@ -357,6 +367,25 @@ $ kubectl config get-contexts
 $ chmod 700 ~/.kube/config.dest.d
 $ chmod 700 ~/.kube/config.src.d
 ```
+
+### Completions not working or showing wrong contexts
+
+If completions show only the current context instead of all contexts:
+
+```bash
+# 1. Ensure KUBECONFIG_ORIG is set correctly
+$ echo $KUBECONFIG_ORIG
+# Should show: /Users/yourusername/.kube/config
+
+# 2. Verify completions are registered
+$ echo ${_comps[kctx]}  # For Zsh
+# Should show: _kubectx-ng
+
+# 3. Reload shell to re-register completions
+$ exec zsh  # or exec bash
+```
+
+If you have Homebrew's `kubectx` installed, kubectx-ng will automatically override its completions. If issues persist, ensure `kubectx-ng.sh` is sourced **after** oh-my-zsh or other completion frameworks in your `.zshrc`.
 
 ## License
 

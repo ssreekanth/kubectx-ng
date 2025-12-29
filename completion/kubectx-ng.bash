@@ -11,8 +11,9 @@ _kubectx_ng()
   # Available flags
   flags="-h --help -c --current -u --unset --mode -d"
 
-  # Get contexts
-  contexts=$(kubectl config get-contexts --output='name' 2>/dev/null)
+  # Get contexts from the original config file (not per-shell config)
+  local orig_kubeconfig="${KUBECONFIG_ORIG:-$HOME/.kube/config}"
+  contexts=$(KUBECONFIG="$orig_kubeconfig" kubectl config get-contexts --output='name' 2>/dev/null)
 
   # Handle -d flag (delete contexts)
   if [[ "$prev_arg" == "-d" ]]; then
