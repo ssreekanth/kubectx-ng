@@ -389,7 +389,7 @@ If you have Homebrew's `kubectx` installed, kubectx-ng will automatically overri
 
 ## License
 
-MIT License - See individual script headers for details.
+Apache License 2.0 - See [LICENSE](LICENSE) file for details.
 
 ## Credits
 
